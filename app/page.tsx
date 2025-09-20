@@ -1,128 +1,201 @@
 "use client";
+import React from "react";
 
-import { useEffect, useMemo, useRef, useState } from "react";
-import styles from "./styles.module.css";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "https://matrix-backend-lv4k.onrender.com";
+const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN || "";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "https://matrix-backend-lv4k.onrender.com";
-const WS_URL   = process.env.NEXT_PUBLIC_WS_URL  ?? "wss://matrix-backend-lv4k.onrender.com/ws";
-const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN ?? "MY_SUPER_TOKEN_123";
+type State = { mode: number; brightness: number; rotation: 0 | 90 | 180 | 270 };
 
-type State = { mode: number; brightness: number };
-
-const MODES = [
-  { id: 0, label: "Idle" },
-  { id: 1, label: "MLB" },
-  { id: 2, label: "Music" },
-  { id: 3, label: "Clock" },
-  { id: 4, label: "Weather" },
-  { id: 5, label: "Picture" },
-];
-
-async function apiGet(): Promise<State> {
-  const res = await fetch(`${API_BASE}/state`, { cache: "no-store" });
-  if (!res.ok) throw new Error("Failed to fetch state");
-  return res.json();
+function normalizeRotation(deg: number): 0 | 90 | 180 | 270 {
+  const opts = [0, 90, 180, 270] as const;
+  let best = 0 as 0 | 90 | 180 | 270, diff = Infinity;
+  for (const o of opts) {
+    const d = Math.abs(o - deg);
+    if (d < diff) { best = o; diff = d; }
+  }
+  return best;
 }
 
-async function apiPost(body: Partial<State>) {
-  const res = await fetch(`${API_BASE}/state`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_TOKEN}`,
-    },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error("Failed to post state");
-  return res.json();
-}
+export default function Home() {
+  const [mode, setMode] = React.useState<number>(0);
+  const [brightness, setBrightness] = React.useState<number>(60);
+  const [rotation, setRotation] = React.useState<0 | 90 | 180 | 270>(0);
+  const [wsOK, setWsOK] = React.useState<boolean>(false);
+  const [loading, setLoading] = React.useState<boolean>(true);
 
-export default function Page() {
-  const [state, setState] = useState<State>({ mode: 0, brightness: 60 });
-  const [connected, setConnected] = useState(false);
-  const [pending, setPending] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
+  async function apiGet(): Promise<State> {
+    const res = await fetch(`${API_BASE}/state`, { cache: "no-store" });
+    if (!res.ok) throw new Error("Failed to fetch state");
+    return res.json();
+  }
 
-  // initial state
-  useEffect(() => {
-    apiGet().then(setState).catch(console.error);
-  }, []);
+  async function apiPost(next: Partial<State>) {
+    const res = await fetch(`${API_BASE}/state`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({
+        mode,
+        brightness,
+        rotation,
+        ...next,
+      }),
+    });
+    if (!res.ok) throw new Error("Failed to update state");
+    const s: State = await res.json();
+    setMode(s.mode);
+    setBrightness(s.brightness);
+    setRotation((s.rotation as 0 | 90 | 180 | 270) ?? 0);
+  }
 
-  // websocket live updates
-  useEffect(() => {
-    const ws = new WebSocket(WS_URL);
-    wsRef.current = ws;
-    ws.onopen = () => setConnected(true);
-    ws.onclose = () => setConnected(false);
-    ws.onmessage = (ev) => {
+  // Initial fetch + WebSocket live updates
+  React.useEffect(() => {
+    (async () => {
       try {
-        const data = JSON.parse(ev.data) as State;
-        setState(data);
-      } catch {}
-    };
-    return () => ws.close();
+        const s = await apiGet();
+        setMode(s.mode);
+        setBrightness(s.brightness);
+        setRotation((s.rotation as 0 | 90 | 180 | 270) ?? 0);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+
+    let ws: WebSocket | null = null;
+    try {
+      const wsUrl = API_BASE.replace(/^http/, "ws") + "/ws";
+      ws = new WebSocket(wsUrl);
+      ws.onopen = () => setWsOK(true);
+      ws.onclose = () => setWsOK(false);
+      ws.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data?.type === "state") {
+            if (typeof data.mode === "number") setMode(data.mode);
+            if (typeof data.brightness === "number") setBrightness(data.brightness);
+            if (typeof data.rotation === "number") setRotation(normalizeRotation(data.rotation));
+          }
+        } catch (e) {}
+      };
+    } catch (e) {
+      console.warn("WS connect failed", e);
+    }
+    return () => { try { ws?.close(); } catch {} };
   }, []);
 
-  const setMode = (m: number) => {
-    setState((s) => ({ ...s, mode: m }));
-    setPending(true);
-    apiPost({ mode: m }).catch(console.error).finally(() => setPending(false));
+  const wrap: React.CSSProperties = {
+    minHeight: "100vh",
+    background: "#0b1437",
+    color: "white",
+    fontFamily: "system-ui, sans-serif",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
   };
-
-  const setBrightness = (b: number) => {
-    setState((s) => ({ ...s, brightness: b }));
-    apiPost({ brightness: b }).catch(console.error);
+  const card: React.CSSProperties = {
+    width: 680,
+    maxWidth: "95vw",
+    background: "rgba(255,255,255,0.06)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: 16,
+    padding: 20,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
   };
+  const row: React.CSSProperties = { display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" };
+  const btn = (active: boolean): React.CSSProperties => ({
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: "1px solid",
+    borderColor: active ? "transparent" : "rgba(255,255,255,0.25)",
+    background: active
+      ? "linear-gradient(180deg,#2563EB,#1D4ED8)"
+      : "rgba(255,255,255,0.08)",
+    color: active ? "white" : "white",
+    cursor: "pointer",
+    fontWeight: 600,
+  });
+  const label: React.CSSProperties = { width: 140, opacity: 0.9 };
+  const input: React.CSSProperties = {
+    padding: "8px 10px",
+    borderRadius: 8,
+    border: "1px solid rgba(255,255,255,0.25)",
+    background: "rgba(255,255,255,0.08)",
+    color: "white",
+    width: 110,
+  };
+  const slider: React.CSSProperties = { width: 260 };
 
-  const statusDotClass = useMemo(
-    () => (connected ? styles.dotLive : styles.dotOffline),
-    [connected]
+  const ModeButton: React.FC<{label: string; value: number}> = ({ label, value }) => (
+    <button style={btn(mode === value)} onClick={() => apiPost({ mode: value })}>
+      {label}
+    </button>
   );
 
   return (
-    <main className={styles.page}>
-      <div className={styles.container}>
-        <header className={styles.header}>
-          <h1 className={styles.title}>Matrix Controller</h1>
-          <div className={styles.status}>
-            <span className={`${styles.dot} ${statusDotClass}`} />
-            <span>{connected ? "Live (WS)" : "Offline"}</span>
-          </div>
-        </header>
+    <div style={wrap}>
+      <div style={card}>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10}}>
+          <h1 style={{margin:0}}>Matrix Controller</h1>
+          <span style={{fontSize:12, opacity:0.8}}>
+            WS: {wsOK ? "connected ✅" : "disconnected ⭕"}
+          </span>
+        </div>
 
-        <section className={styles.card}>
-          <h2 className={styles.sectionTitle}>Modes</h2>
-          <div className={styles.modeGrid}>
-            {MODES.map((m) => {
-              const active = state.mode === m.id;
-              return (
-                <button
-                  key={m.id}
-                  onClick={() => setMode(m.id)}
-                  disabled={pending && active}
-                  className={`${styles.modeBtn} ${active ? styles.modeBtnActive : ""}`}
-                >
-                  {m.label}
-                </button>
-              );
-            })}
+        <div style={{margin:"12px 0"}}>
+          <div style={row}>
+            <ModeButton label="Idle (0)" value={0} />
+            <ModeButton label="MLB (1)" value={1} />
+            <ModeButton label="Music (2)" value={2} />
+            <ModeButton label="Clock (3)" value={3} />
+            <ModeButton label="Weather (4)" value={4} />
+            <ModeButton label="Picture (5)" value={5} />
           </div>
+        </div>
 
-          <div className={styles.brightness}>
-            <label className={styles.brightnessLabel}>
-              Brightness: <strong>{state.brightness}%</strong>
-            </label>
+        <div style={{marginTop:16}}>
+          <div style={row}>
+            <span style={label}>Brightness</span>
             <input
               type="range"
               min={0}
               max={100}
-              value={state.brightness}
-              onChange={(e) => setBrightness(parseInt(e.target.value, 10))}
-              className={styles.slider}
+              value={brightness}
+              onChange={(e) => setBrightness(Number(e.target.value))}
+              onMouseUp={() => apiPost({ brightness })}
+              onTouchEnd={() => apiPost({ brightness })}
+              style={slider}
             />
+            <span style={{minWidth:40, textAlign:"right"}}>{brightness}</span>
+            <button style={btn(false)} onClick={() => apiPost({ brightness })}>Apply</button>
           </div>
-        </section>
+
+          <div style={{...row, marginTop:12}}>
+            <span style={label}>Rotation (deg)</span>
+            <input
+              type="number"
+              value={rotation}
+              onChange={(e) => setRotation(normalizeRotation(Number(e.target.value || 0)))}
+              onBlur={(e) => {
+                const snapped = normalizeRotation(Number(e.target.value || 0));
+                setRotation(snapped);
+                apiPost({ rotation: snapped });
+              }}
+              placeholder="0/90/180/270"
+              style={input}
+            />
+            <button style={btn(false)} onClick={() => apiPost({ rotation })}>Apply</button>
+          </div>
+        </div>
+
+        <div style={{opacity:0.75, fontSize:12, marginTop:16}}>
+          {loading ? "Loading current state…" : `Mode=${mode}  Brightness=${brightness}  Rotation=${rotation}`}
+        </div>
       </div>
-    </main>
+    </div>
   );
 }
