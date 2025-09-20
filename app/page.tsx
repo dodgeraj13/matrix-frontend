@@ -6,14 +6,13 @@ const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN || "";
 
 type State = { mode: number; brightness: number; rotation: 0 | 90 | 180 | 270 };
 
-function normalizeRotation(deg: number): 0 | 90 | 180 | 270 {
-  const opts = [0, 90, 180, 270] as const;
-  let best = 0 as 0 | 90 | 180 | 270, diff = Infinity;
-  for (const o of opts) {
-    const d = Math.abs(o - deg);
-    if (d < diff) { best = o; diff = d; }
+function nextRotation(r: 0 | 90 | 180 | 270): 0 | 90 | 180 | 270 {
+  switch (r) {
+    case 0: return 90;
+    case 90: return 180;
+    case 180: return 270;
+    default: return 0;
   }
-  return best;
 }
 
 export default function Home() {
@@ -77,7 +76,10 @@ export default function Home() {
           if (data?.type === "state") {
             if (typeof data.mode === "number") setMode(data.mode);
             if (typeof data.brightness === "number") setBrightness(data.brightness);
-            if (typeof data.rotation === "number") setRotation(normalizeRotation(data.rotation));
+            if (typeof data.rotation === "number") {
+              const r = data.rotation as 0 | 90 | 180 | 270;
+              setRotation(r);
+            }
           }
         } catch {}
       };
@@ -120,14 +122,6 @@ export default function Home() {
     fontWeight: 600,
   });
   const label: React.CSSProperties = { width: 140, opacity: 0.9 };
-  const input: React.CSSProperties = {
-    padding: "8px 10px",
-    borderRadius: 8,
-    border: "1px solid rgba(255,255,255,0.25)",
-    background: "rgba(255,255,255,0.08)",
-    color: "white",
-    width: 110,
-  };
   const slider: React.CSSProperties = { width: 260 };
 
   const ModeButton: React.FC<{label: string; value: number}> = ({ label, value }) => (
@@ -135,6 +129,12 @@ export default function Home() {
       {label}
     </button>
   );
+
+  const handleRotateClick = async () => {
+    const next = nextRotation(rotation);
+    setRotation(next);                 // optimistic UI
+    try { await apiPost({ rotation: next }); } catch (e) { /* UI will resync via GET/WS */ }
+  };
 
   return (
     <div style={wrap}>
@@ -175,20 +175,11 @@ export default function Home() {
           </div>
 
           <div style={{...row, marginTop:12}}>
-            <span style={label}>Rotation (deg)</span>
-            <input
-              type="number"
-              value={rotation}
-              onChange={(e) => setRotation(normalizeRotation(Number(e.target.value || 0)))}
-              onBlur={(e) => {
-                const snapped = normalizeRotation(Number(e.target.value || 0));
-                setRotation(snapped);
-                apiPost({ rotation: snapped });
-              }}
-              placeholder="0/90/180/270"
-              style={input}
-            />
-            <button style={btn(false)} onClick={() => apiPost({ rotation })}>Apply</button>
+            <span style={label}>Rotation</span>
+            <button style={btn(false)} onClick={handleRotateClick}>
+              Rotate 90°
+            </button>
+            <span style={{opacity:0.85}}>Current: {rotation}°</span>
           </div>
         </div>
 
