@@ -79,7 +79,7 @@ export default function Home() {
             if (typeof data.brightness === "number") setBrightness(data.brightness);
             if (typeof data.rotation === "number") setRotation(normalizeRotation(data.rotation));
           }
-        } catch (e) {}
+        } catch {}
       };
     } catch (e) {
       console.warn("WS connect failed", e);
