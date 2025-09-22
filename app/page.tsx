@@ -18,8 +18,10 @@ function nextRotation(r: 0 | 90 | 180 | 270): 0 | 90 | 180 | 270 {
 
 export default function Home() {
   const [mode, setMode] = React.useState<number>(0);
-  const [brightness, setBrightness] = React.useState<number>(60);
-  const [rotation, setRotation] = React.useState<0 | 90 | 180 | 270>(0);
+  const [brightness, setBrightness] = React.useState<number>(60);          // server-applied
+  const [rotation, setRotation] = React.useState<0 | 90 | 180 | 270>(0);   // server-applied
+  const [pendingBrightness, setPendingBrightness] = React.useState<number>(60);
+  const [pendingRotation, setPendingRotation] = React.useState<0 | 90 | 180 | 270>(0);
   const [wsOK, setWsOK] = React.useState<boolean>(false);
   const [loading, setLoading] = React.useState<boolean>(true);
 
@@ -36,28 +38,27 @@ export default function Home() {
         "Content-Type": "application/json",
         ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
       },
-      body: JSON.stringify({
-        mode,
-        brightness,
-        rotation,
-        ...next,
-      }),
+      body: JSON.stringify(next),
     });
     if (!res.ok) throw new Error("Failed to update state");
     const s: State = await res.json();
     setMode(s.mode);
     setBrightness(s.brightness);
     setRotation((s.rotation as 0 | 90 | 180 | 270) ?? 0);
+    setPendingBrightness(s.brightness);
+    setPendingRotation((s.rotation as 0 | 90 | 180 | 270) ?? 0);
   }
 
-  // Initial fetch + WebSocket live updates
+  // Initial sync + WS updates
   React.useEffect(() => {
     (async () => {
       try {
         const s = await apiGet();
         setMode(s.mode);
         setBrightness(s.brightness);
-        setRotation((s.rotation as 0 | 90 | 180 | 270) ?? 0);
+        setRotation(s.rotation);
+        setPendingBrightness(s.brightness);
+        setPendingRotation(s.rotation);
       } catch (e) {
         console.error(e);
       } finally {
@@ -76,10 +77,10 @@ export default function Home() {
           const data = JSON.parse(ev.data);
           if (data?.type === "state") {
             if (typeof data.mode === "number") setMode(data.mode);
-            if (typeof data.brightness === "number") setBrightness(data.brightness);
+            if (typeof data.brightness === "number") { setBrightness(data.brightness); setPendingBrightness(data.brightness); }
             if (typeof data.rotation === "number") {
               const r = data.rotation as 0 | 90 | 180 | 270;
-              setRotation(r);
+              setRotation(r); setPendingRotation(r);
             }
           }
         } catch {}
@@ -131,11 +132,9 @@ export default function Home() {
     </button>
   );
 
-  const handleRotateClick = async () => {
-    const next = nextRotation(rotation);
-    setRotation(next);                 // optimistic UI
-    try { await apiPost({ rotation: next }); } catch (e) { /* UI will resync via GET/WS */ }
-  };
+  const applyBrightness = () => apiPost({ brightness: pendingBrightness });
+  const clickRotate = () => setPendingRotation(nextRotation(pendingRotation));
+  const applyRotation = () => apiPost({ rotation: pendingRotation });
 
   return (
     <div style={wrap}>
@@ -165,26 +164,23 @@ export default function Home() {
               type="range"
               min={0}
               max={100}
-              value={brightness}
-              onChange={(e) => setBrightness(Number(e.target.value))}
-              onMouseUp={() => apiPost({ brightness })}
-              onTouchEnd={() => apiPost({ brightness })}
+              value={pendingBrightness}
+              onChange={(e) => setPendingBrightness(Number(e.target.value))}
               style={slider}
             />
-            <span style={{minWidth:40, textAlign:"right"}}>{brightness}</span>
-            <button style={btn(false)} onClick={() => apiPost({ brightness })}>Apply</button>
+            <span style={{minWidth:40, textAlign:"right"}}>{pendingBrightness}</span>
+            <button style={btn(false)} onClick={applyBrightness}>Apply</button>
+            <span style={{opacity:0.7, fontSize:12}}>Current: {brightness}</span>
           </div>
 
           <div style={{...row, marginTop:12}}>
             <span style={label}>Rotation</span>
-            <button style={btn(false)} onClick={handleRotateClick}>
-              Rotate 90°
-            </button>
-            <span style={{opacity:0.85}}>Current: {rotation}°</span>
+            <button style={btn(false)} onClick={clickRotate}>Rotate 90°</button>
+            <button style={btn(false)} onClick={applyRotation}>Apply</button>
+            <span style={{opacity:0.85}}>Pending: {pendingRotation}° &nbsp;|&nbsp; Current: {rotation}°</span>
           </div>
         </div>
 
-        {/* Show Picture tool only when Mode 5 is active */}
         {mode === 5 && (
           <div style={{ marginTop: 16 }}>
             <h3 style={{ margin: "0 0 8px 0" }}>Picture (Mode 5)</h3>
