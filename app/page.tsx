@@ -1,5 +1,6 @@
 "use client";
 import React from "react";
+import PictureTool from "./components/PictureTool";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "https://matrix-backend-lv4k.onrender.com";
 const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN || "";
@@ -182,6 +183,14 @@ export default function Home() {
             <span style={{opacity:0.85}}>Current: {rotation}°</span>
           </div>
         </div>
+
+        {/* Show Picture tool only when Mode 5 is active */}
+        {mode === 5 && (
+          <div style={{ marginTop: 16 }}>
+            <h3 style={{ margin: "0 0 8px 0" }}>Picture (Mode 5)</h3>
+            <PictureTool />
+          </div>
+        )}
 
         <div style={{opacity:0.75, fontSize:12, marginTop:16}}>
           {loading ? "Loading current state…" : `Mode=${mode}  Brightness=${brightness}  Rotation=${rotation}`}
