@@ -1,197 +1,258 @@
 "use client";
-import React, { useEffect, useRef, useState } from "react";
+
+import React from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "https://matrix-backend-lv4k.onrender.com";
 const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN || "";
+const MATRIX_SIZE = 64;
 
-// Canvas output size (matrix)
-const OUT = 64;
-
-type DragState = { dragging: boolean; sx: number; sy: number; ox: number; oy: number };
+type StateResponse = { mode: number; brightness: number; rotation: 0 | 90 | 180 | 270 };
 
 export default function PictureTool() {
-  const [img, setImg] = useState<HTMLImageElement | null>(null);
-  const [zoom, setZoom] = useState<number>(1.0);
-  const [offset, setOffset] = useState<{x:number;y:number}>({x:0,y:0});
-  const [busy, setBusy] = useState(false);
-  const [status, setStatus] = useState<string>("");
-  const [etag, setEtag] = useState<string | null>(null);
+  // UI state
+  const [fileName, setFileName] = React.useState<string>("");
+  const [imgURL, setImgURL] = React.useState<string>("");    // original image URL (object URL)
+  const [backendURL, setBackendURL] = React.useState<string>(""); // /image current URL for persistence preview
+  const [loading, setLoading] = React.useState<boolean>(false);
+  const [error, setError] = React.useState<string>("");
 
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const drag = useRef<DragState>({ dragging:false, sx:0, sy:0, ox:0, oy:0 });
+  // canvas & image
+  const canvasRef = React.useRef<HTMLCanvasElement | null>(null);
+  const imgRef = React.useRef<HTMLImageElement | null>(null);
 
-  // Load current image (so re-entering mode keeps last)
-  useEffect(() => {
-    let abort = false;
-    (async () => {
-      try {
-        const res = await fetch(`${API_BASE}/image`, { cache: "no-store" });
-        if (abort) return;
-        if (res.ok) {
-          const tag = res.headers.get("ETag");
-          if (tag) setEtag(tag);
-          const blob = await res.blob();
-          if (blob.size > 0) {
-            const url = URL.createObjectURL(blob);
-            const imgEl = new Image();
-            imgEl.onload = () => {
-              if (!abort) {
-                setImg(imgEl);
-                setZoom(1.0);
-                setOffset({x:0,y:0});
-              }
-              URL.revokeObjectURL(url);
-            };
-            imgEl.src = url;
-          }
-        }
-      } catch {}
-    })();
-    return () => { abort = true; };
-  }, []);
+  // pan/zoom state (logical units: image px)
+  const [scale, setScale] = React.useState<number>(1);
+  const [offset, setOffset] = React.useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Draw preview
-  useEffect(() => {
-    const c = canvasRef.current;
-    const ctx = c?.getContext("2d");
-    if (!c || !ctx) return;
+  // dragging
+  const dragRef = React.useRef<{ dragging: boolean; startX: number; startY: number; startOffX: number; startOffY: number }>({
+    dragging: false, startX: 0, startY: 0, startOffX: 0, startOffY: 0,
+  });
 
-    // preview canvas is 256 for nicer UX (scaled)
-    c.width = 256; c.height = 256;
-    // Fill black frame
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0,0,c.width,c.height);
+  // draw canvas (preview is always MATRIX_SIZE x MATRIX_SIZE in CSS and backing store)
+  const drawPreview = React.useCallback(() => {
+    const canvas = canvasRef.current;
+    const img = imgRef.current;
+    if (!canvas) return;
+
+    // ensure backing store is exact pixels
+    if (canvas.width !== MATRIX_SIZE) canvas.width = MATRIX_SIZE;
+    if (canvas.height !== MATRIX_SIZE) canvas.height = MATRIX_SIZE;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    // black background / borders
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, MATRIX_SIZE, MATRIX_SIZE);
 
     if (!img) return;
 
-    // compute scaled draw
-    const scale = zoom * Math.min(c.width / img.width, c.height / img.height);
-    const dw = img.width * scale;
-    const dh = img.height * scale;
-    const dx = (c.width - dw)/2 + offset.x;
-    const dy = (c.height - dh)/2 + offset.y;
+    // image draw: scale and offset into 64x64 square
+    const iw = img.naturalWidth;
+    const ih = img.naturalHeight;
 
-    // draw
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(img, dx, dy, dw, dh);
+    // destination is fixed (0,0)-(64,64)
+    // we compute source rect from offset/scale
+    // scale means: how many image pixels per canvas pixel
+    // so source size = MATRIX_SIZE * scale
+    const sw = MATRIX_SIZE * scale;
+    const sh = MATRIX_SIZE * scale;
 
-    // draw 64x64 grid preview box (optional helper)
-    ctx.strokeStyle = "rgba(255,255,255,0.2)";
-    ctx.strokeRect(0.5, 0.5, c.width-1, c.height-1);
-  }, [img, zoom, offset]);
+    // source top-left in image space:
+    const sx = offset.x - sw / 2 + iw / 2;
+    const sy = offset.y - sh / 2 + ih / 2;
 
-  // Handlers
-  const onFile = (file: File) => {
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setStatus("Please choose an image file.");
+    ctx.imageSmoothingEnabled = false; // crisp
+    ctx.drawImage(
+      img,
+      sx, sy, sw, sh,
+      0, 0, MATRIX_SIZE, MATRIX_SIZE
+    );
+  }, [scale, offset]);
+
+  // load current backend image on mount (for persistence)
+  React.useEffect(() => {
+    let aborted = false;
+
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/image`, { cache: "no-store" });
+        if (aborted) return;
+
+        if (res.ok) {
+          const blob = await res.blob();
+          if (aborted) return;
+          if (blob.size > 0 && blob.type.startsWith("image/")) {
+            const url = URL.createObjectURL(blob);
+            setBackendURL(url); // show as "currently applied"
+          } else {
+            setBackendURL("");
+          }
+        } else {
+          setBackendURL("");
+        }
+      } catch {
+        // ignore (no existing image)
+        setBackendURL("");
+      }
+    })();
+
+    return () => {
+      aborted = true;
+    };
+  }, []);
+
+  // when a user picks a file
+  const onFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError("");
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (f.type !== "image/png") {
+      setError("Please upload a PNG file.");
       return;
     }
-    const url = URL.createObjectURL(file);
-    const el = new Image();
-    el.onload = () => {
-      setImg(el);
-      setZoom(1.0);
-      setOffset({x:0,y:0});
-      setStatus("");
-      URL.revokeObjectURL(url);
-    };
-    el.src = url;
+
+    setFileName(f.name);
+    const url = URL.createObjectURL(f);
+    setImgURL(url);
+
+    // Reset transform for new image
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
   };
 
-  const onDrop: React.DragEventHandler<HTMLDivElement> = (e) => {
+  // when preview <img> loads, set default zoom to "cover" square
+  const onImageLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = e.currentTarget;
+    imgRef.current = img;
+
+    // Choose a default scale so the shorter side fills 64px (cover)
+    const iw = img.naturalWidth;
+    const ih = img.naturalHeight;
+    const coverScale = Math.max(iw, ih) / MATRIX_SIZE; // image pixels per canvas pixel
+    setScale(coverScale);
+    setOffset({ x: 0, y: 0 }); // center
+    // draw once
+    requestAnimationFrame(drawPreview);
+  };
+
+  // pan handling
+  const onMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    dragRef.current.dragging = true;
+    dragRef.current.startX = e.clientX;
+    dragRef.current.startY = e.clientY;
+    dragRef.current.startOffX = offset.x;
+    dragRef.current.startOffY = offset.y;
+  };
+  const onMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!dragRef.current.dragging) return;
+    const dx = e.clientX - dragRef.current.startX;
+    const dy = e.clientY - dragRef.current.startY;
+    // map pixels in canvas preview to image-space offset:
+    // 1 canvas pixel => scale image pixels
+    setOffset({ x: dragRef.current.startOffX + dx * scale, y: dragRef.current.startOffY + dy * scale });
+  };
+  const onMouseUp = (_e: React.MouseEvent<HTMLDivElement>) => {
+    dragRef.current.dragging = false;
+  };
+  const onMouseLeave = (_e: React.MouseEvent<HTMLDivElement>) => {
+    dragRef.current.dragging = false;
+  };
+
+  // wheel zoom (pinch-like)
+  const onWheel = (e: React.WheelEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const f = e.dataTransfer.files?.[0];
-    if (f) onFile(f);
+    const direction = Math.sign(e.deltaY); // 1 = zoom out, -1 = zoom in
+    const factor = direction > 0 ? 1.10 : 0.90;
+    let next = scale * factor;
+    // clamp: avoid zero / extreme
+    next = Math.max(0.2, Math.min(16, next));
+    setScale(next);
   };
 
-  const onBrowse: React.ChangeEventHandler<HTMLInputElement> = (e) => {
-    const f = e.target.files?.[0];
-    if (f) onFile(f);
-  };
+  // redraw on pan/zoom changes
+  React.useEffect(() => {
+    drawPreview();
+  }, [drawPreview]);
 
-  // drag-to-pan
-  const onMouseDown: React.MouseEventHandler<HTMLCanvasElement> = (e) => {
-    drag.current = { dragging:true, sx:e.clientX, sy:e.clientY, ox:offset.x, oy:offset.y };
-  };
-  const onMouseMove: React.MouseEventHandler<HTMLCanvasElement> = (e) => {
-    if (!drag.current.dragging) return;
-    const dx = e.clientX - drag.current.sx;
-    const dy = e.clientY - drag.current.sy;
-    setOffset({ x: drag.current.ox + dx, y: drag.current.oy + dy });
-  };
-  const onMouseUp: React.MouseEventHandler<HTMLCanvasElement> = () => {
-    drag.current.dragging = false;
-  };
-
-  const applyToMatrix = async () => {
-    if (!img) { setStatus("No image selected."); return; }
-    setBusy(true);
-    setStatus("Rendering…");
+  // export the canvas to PNG and send to backend, then set Mode 5
+  const onApplyToMatrix = async () => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    setLoading(true);
+    setError("");
 
     try {
-      // Render to true 64x64 with black letterbox
-      const out = document.createElement("canvas");
-      out.width = OUT; out.height = OUT;
-      const ctx = out.getContext("2d")!;
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0,0,OUT,OUT);
-      ctx.imageSmoothingEnabled = false;
+      // Ensure the preview is up-to-date
+      drawPreview();
 
-      // mirror preview transform to 64x64
-      // compute scale of preview relative to 64x64
-      // preview canvas was 256x256; factor = 64/256 = 0.25
-      const factor = OUT / 256;
-      const prevScale = zoom * Math.min(256 / img.width, 256 / img.height);
-      const dw = img.width * prevScale * factor;   // scaled into 64 arena
-      const dh = img.height * prevScale * factor;
-      const dx = (OUT - dw)/2 + offset.x * factor;
-      const dy = (OUT - dh)/2 + offset.y * factor;
+      const blob: Blob | null = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+      if (!blob) throw new Error("Failed to export PNG from canvas");
 
-      ctx.drawImage(img, dx, dy, dw, dh);
-
-      const blob: Blob = await new Promise((resolve) => out.toBlob(b => resolve(b!), "image/png"));
-      // Send as multipart/form-data to avoid 422
-      const form = new FormData();
-      form.append("file", blob, "picture.png");
-
+      // Upload to /image (binary, with token)
       const res = await fetch(`${API_BASE}/image`, {
         method: "POST",
         headers: {
+          "Content-Type": "image/png",
           ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
         },
-        body: form,
+        body: blob,
       });
+
       if (!res.ok) {
-        const txt = await res.text().catch(()=>"");
-        throw new Error(`Upload failed: ${res.status} ${txt}`);
+        const msg = await res.text();
+        throw new Error(`Upload failed: ${res.status} ${msg}`);
       }
-      const json = await res.json();
-      setEtag(json?.etag || null);
-      setStatus("Uploaded. Switch to Picture (mode 5) or leave it there to display.");
 
-      // Optionally auto-switch to mode 5 (comment out if you don’t want it)
-      // await fetch(`${API_BASE}/state`, {
-      //   method: "POST",
-      //   headers: { "Content-Type": "application/json", ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}) },
-      //   body: JSON.stringify({ mode: 5 }),
-      // });
+      // switch to mode 5 (picture)
+      const sres = await fetch(`${API_BASE}/state`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(API_TOKEN ? { Authorization: `Bearer ${API_TOKEN}` } : {}),
+        },
+        body: JSON.stringify({ mode: 5 }),
+      });
 
-    } catch (e:any) {
-      setStatus(String(e?.message || e));
+      if (!sres.ok) {
+        const msg = await sres.text();
+        throw new Error(`Failed to set mode 5: ${sres.status} ${msg}`);
+      }
+
+      // Keep the applied image as "persisted" preview (round-trip from backend)
+      try {
+        const current = await fetch(`${API_BASE}/image`, { cache: "no-store" });
+        if (current.ok) {
+          const b = await current.blob();
+          if (b.size > 0 && b.type.startsWith("image/")) {
+            // revoke old URL if any
+            if (backendURL) URL.revokeObjectURL(backendURL);
+            const url = URL.createObjectURL(b);
+            setBackendURL(url);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown upload error");
     } finally {
-      setBusy(false);
+      setLoading(false);
     }
   };
 
-  const box: React.CSSProperties = {
-    border: "1px dashed rgba(255,255,255,0.4)",
+  // UI styles
+  const row: React.CSSProperties = { display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" };
+  const column: React.CSSProperties = { display: "flex", flexDirection: "column", gap: 8 };
+  const panel: React.CSSProperties = {
+    border: "1px dashed rgba(255,255,255,0.25)",
     borderRadius: 12,
-    padding: 14,
+    padding: 12,
+    background: "rgba(255,255,255,0.05)",
   };
-
   const btn: React.CSSProperties = {
-    padding: "10px 14px",
+    padding: "8px 12px",
     borderRadius: 10,
     border: "1px solid rgba(255,255,255,0.25)",
     background: "rgba(255,255,255,0.08)",
@@ -199,85 +260,101 @@ export default function PictureTool() {
     cursor: "pointer",
     fontWeight: 600,
   };
+  const strong: React.CSSProperties = { fontWeight: 700, opacity: 0.95 };
 
   return (
-    <div>
-      <div style={box}
-           onDrop={onDrop}
-           onDragOver={(e)=>e.preventDefault()}>
-        <div style={{display:"flex", gap:16, flexWrap:"wrap", alignItems:"flex-start"}}>
-          <div style={{display:"flex", flexDirection:"column", gap:8}}>
+    <div style={{ ...column }}>
+      <div style={{ ...panel }}>
+        <div style={{ ...row, justifyContent: "space-between" }}>
+          <label style={{ display: "inline-block" }}>
+            <span style={{ display: "block", marginBottom: 6 }}>Upload PNG</span>
+            <input
+              type="file"
+              accept="image/png"
+              onChange={onFileChange}
+            />
+          </label>
+          {fileName && <div>Selected: <span style={strong}>{fileName}</span></div>}
+        </div>
+
+        <div style={{ ...row, marginTop: 10 }}>
+          <div
+            style={{
+              width: 220, height: 220, display: "grid", placeItems: "center",
+              background: "black", borderRadius: 12, border: "1px solid rgba(255,255,255,0.15)",
+              position: "relative",
+            }}
+            onMouseDown={onMouseDown}
+            onMouseMove={onMouseMove}
+            onMouseUp={onMouseUp}
+            onMouseLeave={onMouseLeave}
+            onWheel={onWheel}
+          >
+            {/* visual 64x64 preview (pixel-art scaled up by CSS) */}
             <canvas
               ref={canvasRef}
-              width={256}
-              height={256}
-              style={{ width:256, height:256, imageRendering:"pixelated", cursor:"grab", background:"#000" }}
-              onMouseDown={onMouseDown}
-              onMouseMove={onMouseMove}
-              onMouseUp={onMouseUp}
-              onMouseLeave={onMouseUp}
-            />
-            <div style={{display:"flex", gap:12, alignItems:"center"}}>
-              <label style={{opacity:0.9, fontSize:12}}>Zoom</label>
-              <input
-                type="range"
-                min={0.5}
-                max={4}
-                step={0.01}
-                value={zoom}
-                onChange={(e)=>setZoom(parseFloat(e.target.value))}
-                style={{ width:180 }}
-              />
-              <span style={{opacity:0.8, fontSize:12}}>{zoom.toFixed(2)}×</span>
-            </div>
-            <div style={{display:"flex", gap:8}}>
-              <input type="file" accept="image/*" onChange={onBrowse}/>
-              <button style={btn} onClick={applyToMatrix} disabled={busy}>
-                {busy ? "Applying…" : "Apply to Matrix"}
-              </button>
-            </div>
-            {!!status && <div style={{fontSize:12, opacity:0.85, marginTop:6}}>{status}</div>}
-            {!!etag && <div style={{fontSize:11, opacity:0.6}}>ETag: {etag}</div>}
-          </div>
-
-          <div>
-            <div style={{opacity:0.85, marginBottom:6}}>Live 64×64 preview</div>
-            <canvas
-              width={OUT}
-              height={OUT}
-              style={{width:128, height:128, imageRendering:"pixelated", background:"#000", borderRadius:8}}
-              ref={(node) => {
-                if (!node) return;
-                // draw tiny live preview
-                const ctx = node.getContext("2d");
-                if (!ctx) return;
-                // render same as main effect
-                const draw = () => {
-                  ctx.fillStyle = "#000";
-                  ctx.fillRect(0,0,OUT,OUT);
-                  if (!img) return;
-                  ctx.imageSmoothingEnabled = false;
-                  const prevScale = zoom * Math.min(256 / img.width, 256 / img.height);
-                  const dw = img.width * prevScale * (OUT/256);
-                  const dh = img.height * prevScale * (OUT/256);
-                  const dx = (OUT - dw)/2 + offset.x * (OUT/256);
-                  const dy = (OUT - dh)/2 + offset.y * (OUT/256);
-                  ctx.drawImage(img, dx, dy, dw, dh);
-                };
-                draw();
-                // re-draw on changes
-                const obs = new MutationObserver(draw);
-                obs.observe(node, { attributes:false });
-                // quick ticker
-                const id = setInterval(draw, 100);
-                return () => { clearInterval(id); obs.disconnect(); };
+              width={MATRIX_SIZE}
+              height={MATRIX_SIZE}
+              style={{
+                width: 196,
+                height: 196,
+                imageRendering: "pixelated", // crisp
+                borderRadius: 6,
               }}
             />
           </div>
+
+          <div style={{ display: "grid", gap: 8 }}>
+            <div>
+              <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 6 }}>Zoom</div>
+              <input
+                type="range"
+                min={0.2}
+                max={16}
+                step={0.01}
+                value={scale}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setScale(Number(e.target.value))}
+                style={{ width: 180 }}
+              />
+            </div>
+
+            <button onClick={onApplyToMatrix} style={btn} disabled={loading || !imgURL}>
+              {loading ? "Applying…" : "Apply to Matrix (Mode 5)"}
+            </button>
+
+            {error && <div style={{ color: "#ff9a9a" }}>{error}</div>}
+          </div>
         </div>
-        <div style={{fontSize:12, opacity:0.8, marginTop:8}}>
-          Tip: drag the canvas to pan; use the slider to zoom. Black borders fill outside the image.
-        </div>
+      </div>
+
+      <div style={{ ...panel }}>
+        <div style={{ marginBottom: 6, opacity: 0.9 }}>Selected image</div>
+        {/* hidden <img> just to load source pixels; we draw to canvas for preview */}
+        {imgURL ? (
+          <img
+            src={imgURL}
+            alt="selected"
+            onLoad={onImageLoad}
+            style={{ display: "none" }}
+          />
+        ) : (
+          <div style={{ fontSize: 12, opacity: 0.7 }}>No image selected yet.</div>
+        )}
+      </div>
+
+      <div style={{ ...panel }}>
+        <div style={{ marginBottom: 6, opacity: 0.9 }}>Currently applied on device</div>
+        {backendURL ? (
+          <img
+            src={backendURL}
+            alt="applied"
+            width={196}
+            height={196}
+            style={{ imageRendering: "pixelated", borderRadius: 6, background: "black", border: "1px solid rgba(255,255,255,0.15)" }}
+          />
+        ) : (
+          <div style={{ fontSize: 12, opacity: 0.7 }}>No image found on device yet.</div>
+        )}
       </div>
     </div>
   );
